@@ -1,3 +1,11 @@
+let token = localStorage.getItem('bill_token');
+let currentUser = null;
+
+try {
+  const saved = localStorage.getItem('bill_user');
+  if (saved) currentUser = JSON.parse(saved);
+} catch {}
+
 const form = document.getElementById('billForm');
 const tableBody = document.getElementById('billTableBody');
 const emptyTip = document.getElementById('emptyTip');
@@ -5,6 +13,9 @@ const statusEl = document.getElementById('status');
 const submitBtn = document.getElementById('submitBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 const formTitle = document.getElementById('formTitle');
+const loginOverlay = document.getElementById('loginOverlay');
+const mainContainer = document.getElementById('mainContainer');
+const userInfo = document.getElementById('userInfo');
 
 let editingId = null;
 let socket = null;
@@ -26,6 +37,98 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function api(url, options = {}) {
+  const opts = {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      'Authorization': 'Bearer ' + (token || '')
+    }
+  };
+  if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(options.body);
+  }
+  return fetch(url, opts);
+}
+
+function showLogin() {
+  loginOverlay.style.display = 'flex';
+  mainContainer.style.display = 'none';
+}
+
+function showMain() {
+  loginOverlay.style.display = 'none';
+  mainContainer.style.display = 'block';
+  applyRoleUI();
+}
+
+function applyRoleUI() {
+  const role = currentUser?.role;
+  const isWaiter = role === 'waiter';
+
+  // 服务员看不到单价
+  const unitPriceField = document.getElementById('unitPriceField');
+  const thUnitPrice = document.getElementById('thUnitPrice');
+  if (isWaiter) {
+    if (unitPriceField) unitPriceField.style.display = 'none';
+    if (thUnitPrice) thUnitPrice.style.display = 'none';
+  } else {
+    if (unitPriceField) unitPriceField.style.display = '';
+    if (thUnitPrice) thUnitPrice.style.display = '';
+  }
+
+  // 用户信息显示
+  const roleText = { admin: '管理员', finance: '财务', waiter: '服务员' };
+  userInfo.textContent = `${currentUser?.username}（${roleText[role] || role}）`;
+}
+
+async function login(username, password) {
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || '登录失败');
+      return false;
+    }
+    token = data.token;
+    currentUser = { username: data.username, role: data.role };
+    localStorage.setItem('bill_token', token);
+    localStorage.setItem('bill_user', JSON.stringify(currentUser));
+    showMain();
+    initApp();
+    return true;
+  } catch {
+    alert('登录失败，请检查网络');
+    return false;
+  }
+}
+
+function logout() {
+  token = null;
+  currentUser = null;
+  localStorage.removeItem('bill_token');
+  localStorage.removeItem('bill_user');
+  if (socket) {
+    socket.disconnect();
+    socket = null;
+  }
+  showLogin();
+}
+
+document.getElementById('loginForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value;
+  login(u, p);
+});
+
+document.getElementById('logoutBtn').addEventListener('click', logout);
+
 function getFilters() {
   return {
     month: document.getElementById('filterMonth').value,
@@ -43,10 +146,12 @@ async function loadData() {
     if (filters.unpaidOnly) params.append('unpaidOnly', filters.unpaidOnly);
 
     const [billsRes, statsRes, companiesRes] = await Promise.all([
-      fetch(`/api/bills?${params}`),
-      fetch('/api/stats'),
-      fetch('/api/companies')
+      api(`/api/bills?${params}`),
+      api('/api/stats'),
+      api('/api/companies')
     ]);
+
+    if (billsRes.status === 401) { logout(); return; }
 
     const bills = await billsRes.json();
     const stats = await statsRes.json();
@@ -77,22 +182,36 @@ function renderTable(bills) {
   }
   emptyTip.style.display = 'none';
 
+  const isWaiter = currentUser?.role === 'waiter';
+  const canEdit = ['finance', 'admin'].includes(currentUser?.role);
+
   bills.forEach(b => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `
+    let html = `
       <td>${b.date}</td>
       <td>${escapeHtml(b.company)}</td>
       <td>${formatNum(b.quantity)}</td>
-      <td>${formatMoney(b.unit_price)}</td>
+    `;
+    if (!isWaiter) {
+      html += `<td>${b.unit_price !== undefined ? formatMoney(b.unit_price) : '-'}</td>`;
+    }
+    html += `
       <td>${formatMoney(b.total_amount)}</td>
       <td>${formatMoney(b.paid)}</td>
       <td class="${b.unpaid > 0 ? 'unpaid' : ''}">${formatMoney(b.unpaid)}</td>
       <td class="note" title="${escapeHtml(b.note)}">${escapeHtml(b.note)}</td>
-      <td>
-        <button class="danger" onclick="startEdit(${b.id})">编辑</button>
-        <button class="danger" onclick="deleteBill(${b.id})">删除</button>
-      </td>
     `;
+    if (canEdit) {
+      html += `
+        <td>
+          <button class="danger" onclick="startEdit(${b.id})">编辑</button>
+          <button class="danger" onclick="deleteBill(${b.id})">删除</button>
+        </td>
+      `;
+    } else {
+      html += `<td>-</td>`;
+    }
+    tr.innerHTML = html;
     tableBody.appendChild(tr);
   });
 }
@@ -109,8 +228,9 @@ function updateCompanyFilter(companies) {
 }
 
 function updatePreview() {
+  const isWaiter = currentUser?.role === 'waiter';
   const qty = parseFloat(document.getElementById('quantity').value) || 0;
-  const price = parseFloat(document.getElementById('unitPrice').value) || 0;
+  const price = isWaiter ? 0 : (parseFloat(document.getElementById('unitPrice').value) || 0);
   const paid = parseFloat(document.getElementById('paid').value) || 0;
   const total = qty * price;
   const unpaid = total - paid;
@@ -130,7 +250,8 @@ function resetForm() {
 
 async function startEdit(id) {
   try {
-    const res = await fetch('/api/bills');
+    const res = await api('/api/bills');
+    if (res.status === 401) { logout(); return; }
     const bills = await res.json();
     const b = bills.find(x => x.id === id);
     if (!b) return;
@@ -138,7 +259,9 @@ async function startEdit(id) {
     document.getElementById('date').value = b.date;
     document.getElementById('company').value = b.company;
     document.getElementById('quantity').value = b.quantity;
-    document.getElementById('unitPrice').value = b.unit_price;
+    if (!currentUser || currentUser.role !== 'waiter') {
+      document.getElementById('unitPrice').value = b.unit_price;
+    }
     document.getElementById('paid').value = b.paid;
     document.getElementById('note').value = b.note || '';
 
@@ -156,7 +279,9 @@ async function startEdit(id) {
 async function deleteBill(id) {
   if (!confirm('确定删除这条记录吗？')) return;
   try {
-    await fetch(`/api/bills/${id}`, { method: 'DELETE' });
+    const res = await api(`/api/bills/${id}`, { method: 'DELETE' });
+    if (res.status === 401) { logout(); return; }
+    if (!res.ok) { alert('权限不足'); return; }
     loadData();
   } catch (err) {
     alert('删除失败');
@@ -165,9 +290,10 @@ async function deleteBill(id) {
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
+  const isWaiter = currentUser?.role === 'waiter';
 
   const quantity = parseFloat(document.getElementById('quantity').value) || 0;
-  const unitPrice = parseFloat(document.getElementById('unitPrice').value) || 0;
+  const unitPrice = isWaiter ? 0 : (parseFloat(document.getElementById('unitPrice').value) || 0);
   const paid = parseFloat(document.getElementById('paid').value) || 0;
   const total = quantity * unitPrice;
   const unpaid = total - paid;
@@ -184,19 +310,20 @@ form.addEventListener('submit', async (e) => {
   };
 
   try {
+    let res;
     if (editingId) {
-      await fetch(`/api/bills/${editingId}`, {
+      res = await api(`/api/bills/${editingId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bill)
+        body: bill
       });
     } else {
-      await fetch('/api/bills', {
+      res = await api('/api/bills', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bill)
+        body: bill
       });
     }
+    if (res.status === 401) { logout(); return; }
+    if (!res.ok) { alert('权限不足或保存失败'); return; }
     resetForm();
     loadData();
   } catch (err) {
@@ -207,7 +334,8 @@ form.addEventListener('submit', async (e) => {
 cancelBtn.addEventListener('click', resetForm);
 
 ['quantity', 'unitPrice', 'paid'].forEach(id => {
-  document.getElementById(id).addEventListener('input', updatePreview);
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('input', updatePreview);
 });
 
 document.getElementById('filterMonth').addEventListener('change', loadData);
@@ -223,7 +351,8 @@ document.getElementById('resetFilter').addEventListener('click', () => {
 
 document.getElementById('exportBtn').addEventListener('click', async () => {
   try {
-    const res = await fetch('/api/bills');
+    const res = await api('/api/bills');
+    if (res.status === 401) { logout(); return; }
     const bills = await res.json();
     const blob = new Blob([JSON.stringify({ bills }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -253,10 +382,9 @@ document.getElementById('importBtn').addEventListener('change', async (e) => {
         if (b.date && b.company && b.quantity && b.unit_price) {
           const total = parseFloat(b.quantity) * parseFloat(b.unit_price);
           const paid = parseFloat(b.paid) || 0;
-          await fetch('/api/bills', {
+          const res = await api('/api/bills', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+            body: {
               date: b.date,
               company: b.company,
               quantity: parseFloat(b.quantity),
@@ -265,14 +393,14 @@ document.getElementById('importBtn').addEventListener('change', async (e) => {
               paid: paid,
               unpaid: total - paid,
               note: b.note || ''
-            })
+            }
           });
-          count++;
+          if (res.ok) count++;
         }
       }
       alert(`成功导入 ${count} 条记录`);
       loadData();
-    } catch (err) {
+    } catch {
       alert('导入失败：文件格式错误');
     }
   };
@@ -281,11 +409,13 @@ document.getElementById('importBtn').addEventListener('change', async (e) => {
 });
 
 // Socket.io 实时同步
-const isLocalFile = location.protocol === 'file:';
+function initSocket() {
+  const isLocalFile = location.protocol === 'file:';
+  if (isLocalFile) {
+    statusEl.textContent = '请通过 http://localhost:3000 访问';
+    return;
+  }
 
-if (isLocalFile) {
-  statusEl.textContent = '请通过 http://localhost:3000 访问';
-} else {
   try {
     socket = io({
       reconnectionDelay: 2000,
@@ -326,5 +456,16 @@ if (isLocalFile) {
   }
 }
 
-document.getElementById('date').valueAsDate = new Date();
-loadData();
+function initApp() {
+  document.getElementById('date').valueAsDate = new Date();
+  loadData();
+  initSocket();
+}
+
+// 初始化：已登录则进主界面，否则显示登录
+if (token && currentUser) {
+  showMain();
+  initApp();
+} else {
+  showLogin();
+}

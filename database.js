@@ -1,5 +1,6 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const bcrypt = require('bcryptjs');
 
 const DB_PATH = path.join(__dirname, 'bills.db');
 const db = new sqlite3.Database(DB_PATH);
@@ -17,6 +18,25 @@ db.serialize(() => {
     note TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'waiter',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`, async function() {
+    const count = await query('SELECT COUNT(*) as c FROM users');
+    if (count[0].c === 0) {
+      const hash = await bcrypt.hash('admin123', 10);
+      await run('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', ['admin', hash, 'admin']);
+      const hash2 = await bcrypt.hash('finance123', 10);
+      await run('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', ['finance', hash2, 'finance']);
+      const hash3 = await bcrypt.hash('waiter123', 10);
+      await run('INSERT INTO users (username, password, role) VALUES (?, ?, ?)', ['waiter', hash3, 'waiter']);
+      console.log('默认用户已创建: admin/admin123, finance/finance123, waiter/waiter123');
+    }
+  });
 });
 
 function query(sql, params = []) {
@@ -38,6 +58,10 @@ function run(sql, params = []) {
 }
 
 module.exports = {
+  db,
+  query,
+  run,
+
   async getAll(filters = {}) {
     let sql = 'SELECT * FROM bills WHERE 1=1';
     const params = [];
@@ -89,5 +113,14 @@ module.exports = {
   async getStats() {
     const row = await query('SELECT SUM(quantity) as total_qty, SUM(total_amount) as total_amount, SUM(paid) as total_paid, SUM(unpaid) as total_unpaid, COUNT(CASE WHEN unpaid > 0 THEN 1 END) as unpaid_count FROM bills');
     return row[0];
+  },
+
+  async findUser(username) {
+    const rows = await query('SELECT * FROM users WHERE username = ?', [username]);
+    return rows[0] || null;
+  },
+
+  async getUsers() {
+    return query('SELECT id, username, role, created_at FROM users ORDER BY id');
   }
 };
