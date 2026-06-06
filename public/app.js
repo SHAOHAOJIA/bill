@@ -281,21 +281,49 @@ document.getElementById('importBtn').addEventListener('change', async (e) => {
 });
 
 // Socket.io 实时同步
-try {
-  socket = io();
-  socket.on('connect', () => {
-    statusEl.textContent = '在线同步';
-    statusEl.classList.add('online');
-  });
-  socket.on('disconnect', () => {
-    statusEl.textContent = '离线模式';
-    statusEl.classList.remove('online');
-  });
-  socket.on('update', () => {
-    loadData();
-  });
-} catch {
-  statusEl.textContent = '单机模式';
+const isLocalFile = location.protocol === 'file:';
+
+if (isLocalFile) {
+  statusEl.textContent = '请通过 http://localhost:3000 访问';
+} else {
+  try {
+    socket = io({
+      reconnectionDelay: 2000,
+      reconnectionDelayMax: 10000,
+      reconnectionAttempts: Infinity,
+      timeout: 20000,
+      transports: ['websocket', 'polling']
+    });
+
+    let wasConnected = false;
+
+    socket.on('connect', () => {
+      wasConnected = true;
+      statusEl.textContent = '在线同步';
+      statusEl.classList.add('online');
+    });
+
+    socket.on('disconnect', (reason) => {
+      statusEl.textContent = '离线模式';
+      statusEl.classList.remove('online');
+      console.log('断开原因:', reason);
+    });
+
+    socket.on('connect_error', () => {
+      if (!wasConnected) {
+        statusEl.textContent = '连接中...';
+      } else {
+        statusEl.textContent = '重连中...';
+      }
+      statusEl.classList.remove('online');
+    });
+
+    socket.on('update', () => {
+      loadData();
+    });
+  } catch {
+    statusEl.textContent = '单机模式';
+  }
 }
 
 document.getElementById('date').valueAsDate = new Date();
